@@ -2,6 +2,11 @@
 
 An agentic system that reads research papers (local PDFs or arXiv), generates implementation plans, writes code, and reviews it — all orchestrated by a central Director agent built on the **Claude Agent SDK**.
 
+## Artifacts
+
+### Rewrote transformer in C using research swarm
+<img width="1243" height="785" alt="Screenshot 2026-03-22 at 11 39 05 AM" src="https://github.com/user-attachments/assets/0b06bfb7-668c-4ed4-8e5d-1500f287d2a6" />
+
 ## Architecture
 
 ```mermaid
