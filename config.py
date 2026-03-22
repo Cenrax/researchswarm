@@ -1,6 +1,8 @@
 """Shared configuration for the research swarm."""
 
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -10,10 +12,12 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"
-SUMMARIES_DIR = OUTPUT_DIR / "summaries"
-PLANS_DIR = OUTPUT_DIR / "plans"
-CODE_DIR = OUTPUT_DIR / "code"
-REVIEWS_DIR = OUTPUT_DIR / "reviews"
+
+# These are set dynamically per project via create_project_output()
+SUMMARIES_DIR: Path = OUTPUT_DIR / "summaries"
+PLANS_DIR: Path = OUTPUT_DIR / "plans"
+CODE_DIR: Path = OUTPUT_DIR / "code"
+REVIEWS_DIR: Path = OUTPUT_DIR / "reviews"
 
 # ── ArXiv MCP Server ────────────────────────────────────────────────────────
 ARXIV_STORAGE_PATH = os.getenv(
@@ -94,7 +98,51 @@ def discover_papers(week_dir: Path) -> dict:
     )
 
 
-def ensure_output_dirs() -> None:
-    """Create output directories if they don't exist."""
+def _slugify(text: str) -> str:
+    """Convert text to a filesystem-safe slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text[:60].rstrip("-")
+
+
+def create_project_output(objective: str) -> dict[str, Path]:
+    """Create a timestamped project subfolder under output/.
+
+    Folder name: <timestamp>_<objective-slug>
+    e.g. output/20260322_143021_build-a-transformer-text-classifier/
+
+    Returns a dict with the project paths and updates the module-level
+    SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR.
+    """
+    global SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR
+
+    slug = _slugify(objective)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    project_dir = OUTPUT_DIR / f"{timestamp}_{slug}"
+
+    SUMMARIES_DIR = project_dir / "summaries"
+    PLANS_DIR = project_dir / "plans"
+    CODE_DIR = project_dir / "code"
+    REVIEWS_DIR = project_dir / "reviews"
+
     for d in (SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "project_dir": project_dir,
+        "summaries": SUMMARIES_DIR,
+        "plans": PLANS_DIR,
+        "code": CODE_DIR,
+        "reviews": REVIEWS_DIR,
+    }
+
+
+def list_projects() -> list[Path]:
+    """List all existing project folders under output/, newest first."""
+    if not OUTPUT_DIR.exists():
+        return []
+    return sorted(
+        [d for d in OUTPUT_DIR.iterdir() if d.is_dir()],
+        reverse=True,
+    )

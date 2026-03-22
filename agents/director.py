@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -43,12 +42,8 @@ from claude_agent_sdk.types import (
 
 from config import (
     ARXIV_MCP_CONFIG,
-    CODE_DIR,
     DIRECTOR_MODEL,
-    PLANS_DIR,
-    REVIEWS_DIR,
-    SUMMARIES_DIR,
-    ensure_output_dirs,
+    create_project_output,
     get_latest_week_dir,
 )
 
@@ -351,7 +346,8 @@ async def run_director(
         papers: List of file paths (local mode) or arXiv IDs (arxiv mode).
         mode: "local" for files in the input folder, "arxiv" for MCP.
     """
-    ensure_output_dirs()
+    paths = create_project_output(objective)
+    project_dir = paths["project_dir"]
 
     week_dir = get_latest_week_dir()
 
@@ -379,11 +375,12 @@ async def run_director(
         f"## Objective\n{objective}\n\n"
         f"{papers_section}\n\n"
         f"## Week Folder\n{week_dir}\n\n"
+        f"## Project Output Directory\n{project_dir}\n\n"
         f"## Output Directories\n"
-        f"- Summaries: {SUMMARIES_DIR}\n"
-        f"- Plans: {PLANS_DIR}\n"
-        f"- Code: {CODE_DIR}\n"
-        f"- Reviews: {REVIEWS_DIR}\n\n"
+        f"- Summaries: {paths['summaries']}\n"
+        f"- Plans: {paths['plans']}\n"
+        f"- Code: {paths['code']}\n"
+        f"- Reviews: {paths['reviews']}\n\n"
         f"{begin_msg}"
     )
 
@@ -425,6 +422,7 @@ async def run_director(
     for p in papers:
         print(f"    - {p}")
     print(f"  Week: {week_dir.name}")
+    print(f"  Output: {project_dir}")
     print(f"{'='*60}\n")
 
     # The SDK requires an AsyncIterable prompt when can_use_tool is set.
