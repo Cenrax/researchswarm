@@ -7,6 +7,9 @@ An agentic system that reads research papers (local PDFs or arXiv), generates im
 ### Rewrote transformer in C using research swarm
 <img width="1243" height="785" alt="Screenshot 2026-03-22 at 11 39 05 AM" src="https://github.com/user-attachments/assets/0b06bfb7-668c-4ed4-8e5d-1500f287d2a6" />
 
+### Working video
+https://drive.google.com/file/d/1_X-twfbmvwykQ3i8JyU2HN_gqcr0T0-S/view?usp=sharing
+
 ## Architecture
 
 ```mermaid
