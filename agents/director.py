@@ -81,9 +81,31 @@ async def can_use_tool(tool_name: str, input_data: dict, context) -> object:
     if tool_name.startswith("mcp__arxiv"):
         return PermissionResultAllow(updated_input=input_data)
 
-    # For AskUserQuestion, always allow (it's asking the user)
+    # For AskUserQuestion, intercept and show to user in the terminal.
+    # The user's answer is returned as modified tool input so the agent
+    # receives it as the tool result.
     if tool_name == "AskUserQuestion":
-        return PermissionResultAllow(updated_input=input_data)
+        question = input_data.get("question", "")
+        options_list = input_data.get("options", [])
+
+        print(f"\n{'='*60}")
+        print(f"  {_CYAN}{_BOLD}Agent is asking:{_RESET}")
+        print(f"  {question}")
+        if options_list:
+            for i, opt in enumerate(options_list):
+                if isinstance(opt, dict):
+                    label = opt.get("label", opt.get("value", str(opt)))
+                    desc = opt.get("description", "")
+                    print(f"    {i+1}. {label}" + (f" — {desc}" if desc else ""))
+                else:
+                    print(f"    {i+1}. {opt}")
+        print(f"{'='*60}")
+
+        user_answer = input("  Your answer: ").strip()
+
+        # Return the answer back into the tool input so the agent gets it
+        updated = {**input_data, "answer": user_answer}
+        return PermissionResultAllow(updated_input=updated)
 
     # For Agent tool, always allow (director needs to spawn sub-agents)
     if tool_name == "Agent":
@@ -427,34 +449,3 @@ async def run_director(
 
     async for message in query(prompt=prompt_stream(), options=options):
         _log_message(message)
-
-        # When the Director asks a question via text, prompt the user for
-        # input and feed the response back into the stream.
-        if isinstance(message, AssistantMessage):
-            has_question = False
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    text = block.text.lower()
-                    if any(q in text for q in [
-                        "which papers", "should we proceed",
-                        "does this plan look good", "any changes",
-                        "want to proceed", "want to iterate",
-                        "shall i proceed", "would you like",
-                        "approve?", "proceed?",
-                        "?",  # Catch-all for questions
-                    ]):
-                        has_question = True
-                        break
-
-            if has_question:
-                print(f"\n{_YELLOW}{_BOLD}  Waiting for your input...{_RESET}")
-                user_input = await asyncio.get_event_loop().run_in_executor(
-                    None, input, "  Your response: "
-                )
-                if user_input.strip():
-                    await user_queue.put({
-                        "type": "user",
-                        "session_id": "",
-                        "message": {"role": "user", "content": user_input.strip()},
-                        "parent_tool_use_id": None,
-                    })
