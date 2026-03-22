@@ -80,26 +80,46 @@ async def can_use_tool(tool_name: str, input_data: dict, context) -> object:
     # The user's answer is returned as modified tool input so the agent
     # receives it as the tool result.
     if tool_name == "AskUserQuestion":
-        question = input_data.get("question", "")
-        options_list = input_data.get("options", [])
+        # The tool input can have two formats:
+        # 1. Simple: {"question": "...", "options": [...]}
+        # 2. Multi:  {"questions": [{"question": "...", "header": "...", "options": [...]}]}
+        questions = input_data.get("questions", [])
+        if not questions:
+            # Simple format — wrap in list
+            questions = [{
+                "question": input_data.get("question", ""),
+                "header": "",
+                "options": input_data.get("options", []),
+            }]
 
-        print(f"\n{'='*60}")
-        print(f"  {_CYAN}{_BOLD}Agent is asking:{_RESET}")
-        print(f"  {question}")
-        if options_list:
-            for i, opt in enumerate(options_list):
-                if isinstance(opt, dict):
-                    label = opt.get("label", opt.get("value", str(opt)))
-                    desc = opt.get("description", "")
-                    print(f"    {i+1}. {label}" + (f" — {desc}" if desc else ""))
-                else:
-                    print(f"    {i+1}. {opt}")
-        print(f"{'='*60}")
+        answers = {}
+        for q in questions:
+            q_text = q.get("question", "")
+            q_header = q.get("header", "")
+            q_options = q.get("options", [])
 
-        user_answer = input("  Your answer: ").strip()
+            print(f"\n{'='*60}")
+            if q_header:
+                print(f"  {_CYAN}{_BOLD}{q_header}{_RESET}")
+            print(f"  {_BOLD}{q_text}{_RESET}")
+            if q_options:
+                print()
+                for i, opt in enumerate(q_options):
+                    if isinstance(opt, dict):
+                        label = opt.get("label", opt.get("value", str(opt)))
+                        desc = opt.get("description", "")
+                        print(f"    {i+1}. {label}" + (f" — {desc}" if desc else ""))
+                    else:
+                        print(f"    {i+1}. {opt}")
+            print(f"{'='*60}")
 
-        # Return the answer back into the tool input so the agent gets it
-        updated = {**input_data, "answer": user_answer}
+            user_answer = input("  Your answer: ").strip()
+            answers[q_text] = user_answer
+
+        # Return answers back so the agent receives them
+        updated = {**input_data, "answers": answers}
+        if len(answers) == 1:
+            updated["answer"] = list(answers.values())[0]
         return PermissionResultAllow(updated_input=updated)
 
     # For Agent tool, always allow (director needs to spawn sub-agents)
@@ -236,15 +256,21 @@ def _log_message(message: object) -> None:
                     prompt_preview = block.input.get("prompt", "")[:150]
                     if prompt_preview:
                         print(f"  {_DIM}Prompt: {prompt_preview}...{_RESET}")
+                elif block.name == "AskUserQuestion":
+                    # Don't log here — the can_use_tool callback
+                    # will show the full question and collect the answer.
+                    print(
+                        f"\n{_YELLOW}{_BOLD}[{_ts()}] Asking user for input...{_RESET}"
+                    )
                 else:
                     print(
                         f"\n{_YELLOW}[{_ts()}] Tool call: {_BOLD}{block.name}{_RESET}"
                     )
-                    # Show relevant input (truncated)
+                    # Show relevant input (truncated for non-question tools)
                     for key, val in block.input.items():
                         val_str = str(val)
-                        if len(val_str) > 120:
-                            val_str = val_str[:120] + "..."
+                        if len(val_str) > 200:
+                            val_str = val_str[:200] + "..."
                         print(f"  {_DIM}{key}: {val_str}{_RESET}")
 
             elif isinstance(block, ThinkingBlock):

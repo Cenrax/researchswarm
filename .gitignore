@@ -17,6 +17,9 @@ output/plans/
 output/code/
 output/reviews/
 
+output/
+input/
+
 # Downloaded papers
 papers/
 

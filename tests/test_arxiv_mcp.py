@@ -228,6 +228,99 @@ def test_search_papers_tool():
             proc.kill()
 
 
+def test_download_and_read_paper():
+    """Download paper 1706.03762 (Attention Is All You Need) and verify content is returned."""
+    if not _docker_available():
+        print("SKIP: Docker not running")
+        return
+    if not _image_exists("mcp/arxiv-mcp-server"):
+        print("SKIP: arxiv image not pulled")
+        return
+
+    cmd = [ARXIV_MCP_CONFIG["command"]] + ARXIV_MCP_CONFIG["args"]
+    env = {**ARXIV_MCP_CONFIG.get("env", {})}
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**dict(__import__("os").environ), **env},
+    )
+
+    try:
+        # Initialize
+        _send_jsonrpc(proc, "initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0.1.0"},
+        }, req_id=1)
+
+        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        proc.stdin.write(json.dumps(notif) + "\n")
+        proc.stdin.flush()
+
+        # Step 1: Download the paper
+        paper_id = "1706.03762"
+        print(f"  Downloading paper {paper_id}...")
+        download_resp = _send_jsonrpc(proc, "tools/call", {
+            "name": "download_paper",
+            "arguments": {"paper_id": paper_id},
+        }, req_id=10)
+
+        if "error" in download_resp:
+            print(f"  ✗ download_paper error: {download_resp['error']}")
+            print("  (May require network access)")
+            return
+
+        print(f"  ✓ download_paper succeeded")
+
+        # Step 2: Read the paper
+        print(f"  Reading paper {paper_id}...")
+        read_resp = _send_jsonrpc(proc, "tools/call", {
+            "name": "read_paper",
+            "arguments": {"paper_id": paper_id},
+        }, req_id=11)
+
+        if "error" in read_resp:
+            print(f"  ✗ read_paper error: {read_resp['error']}")
+            return
+
+        assert "result" in read_resp, f"read_paper returned no result: {read_resp}"
+        content = read_resp["result"].get("content", [])
+        assert len(content) > 0, "read_paper returned empty content"
+
+        # Extract text from the response
+        full_text = ""
+        for block in content:
+            if block.get("type") == "text":
+                full_text += block.get("text", "")
+
+        assert len(full_text) > 500, (
+            f"Paper content too short ({len(full_text)} chars), expected a full paper"
+        )
+
+        # Verify it's actually "Attention Is All You Need"
+        text_lower = full_text.lower()
+        assert "attention" in text_lower, "Paper content doesn't mention 'attention'"
+        assert "transformer" in text_lower, "Paper content doesn't mention 'transformer'"
+
+        print(f"  ✓ read_paper returned {len(full_text):,} characters")
+        print(f"  ✓ Content contains 'attention' and 'transformer'")
+
+        # Show a preview
+        preview = full_text[:300].replace("\n", " ")
+        print(f"  Preview: {preview}...")
+
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_storage_path_exists():
     """The ARXIV_STORAGE_PATH directory should exist or be creatable."""
     path = Path(ARXIV_STORAGE_PATH)
@@ -248,6 +341,7 @@ def run_all():
         test_storage_path_exists,
         test_mcp_server_starts_and_lists_tools,
         test_search_papers_tool,
+        test_download_and_read_paper,
     ]
 
     passed = 0
