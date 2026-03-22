@@ -598,6 +598,51 @@ CODER_MODEL = "opus"
 REVIEWER_MODEL = "sonnet"
 ```
 
+## Web UI
+
+A full web dashboard to visualize the pipeline in real-time — enter objectives, upload papers, watch agents work, and approve steps from the browser.
+
+### Start the Backend
+
+```bash
+# From the project root (with venv activated)
+cd /Users/subham/Desktop/codes/agentsclaude
+source venv/bin/activate
+uvicorn server:app --reload --port 8000
+```
+
+The API runs at `http://localhost:8000`. Endpoints:
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/api/run` | Start pipeline with `{"objective": "..."}` |
+| `POST` | `/api/upload` | Upload PDF/MD/TXT papers |
+| `GET` | `/api/projects` | List all past project runs |
+| `GET` | `/api/projects/{id}/files` | File tree for a project |
+| `GET` | `/api/projects/{id}/file?path=...` | Read file content |
+| `GET` | `/api/papers` | List papers in latest week folder |
+| `WS` | `/ws/{project_id}` | Real-time pipeline events |
+
+### Start the Frontend
+
+```bash
+# From the ui/ directory
+cd ui
+npm install
+npm run dev
+```
+
+The UI runs at `http://localhost:3000`.
+
+### Using the UI
+
+1. Open `http://localhost:3000`
+2. Drop PDF files into the upload zone (or add them to `input/week_N/` manually)
+3. Type your objective and click **Run Pipeline**
+4. Watch the live log, pipeline stages, and file tree update in real-time
+5. When the agent asks a question, an approval dialog pops up — click an option or type a free-text answer
+6. Click any file in the sidebar to preview its content
+
 ## License
 
 MIT

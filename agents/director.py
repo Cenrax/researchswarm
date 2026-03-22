@@ -473,3 +473,244 @@ async def run_director(
 
     async for message in query(prompt=prompt_stream(), options=options):
         _log_message(message)
+
+
+# ── UI Mode ──────────────────────────────────────────────────────────────────
+
+async def _emit_message(message: object, emitter: "EventEmitter") -> None:
+    """Convert SDK messages to UI events and emit them."""
+    from events import EventEmitter
+
+    if isinstance(message, AssistantMessage):
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                await emitter.emit({
+                    "type": "log",
+                    "level": "info",
+                    "message": block.text,
+                    "source": "director",
+                })
+            elif isinstance(block, ToolUseBlock):
+                if block.name == "Agent":
+                    agent_name = block.input.get("subagent_type", "general-purpose")
+                    desc = block.input.get("description", "")
+                    await emitter.emit({
+                        "type": "agent_spawn",
+                        "agent": agent_name,
+                        "description": desc,
+                    })
+                elif block.name != "AskUserQuestion":
+                    await emitter.emit({
+                        "type": "tool_call",
+                        "tool": block.name,
+                        "input": {
+                            k: str(v)[:300] for k, v in block.input.items()
+                        },
+                    })
+
+    elif isinstance(message, ToolResultBlock):
+        content = str(message.content or "")[:300]
+        await emitter.emit({
+            "type": "tool_result",
+            "tool": "",
+            "preview": content,
+            "is_error": bool(message.is_error),
+        })
+
+    elif isinstance(message, TaskStartedMessage):
+        await emitter.emit({
+            "type": "task_started",
+            "description": message.description,
+        })
+
+    elif isinstance(message, TaskProgressMessage):
+        tokens = message.usage.get("total_tokens", 0) if message.usage else 0
+        await emitter.emit({
+            "type": "task_progress",
+            "description": message.description,
+            "tokens": tokens,
+            "last_tool": message.last_tool_name or "",
+        })
+
+    elif isinstance(message, TaskNotificationMessage):
+        await emitter.emit({
+            "type": "task_complete",
+            "status": message.status,
+            "summary": message.summary[:300],
+        })
+
+    elif isinstance(message, SystemMessage):
+        if message.subtype == "init":
+            mcp_servers = message.data.get("mcp_servers", [])
+            await emitter.emit({
+                "type": "init",
+                "mcp_servers": [
+                    {"name": s.get("name", "?"), "status": s.get("status", "unknown")}
+                    for s in mcp_servers
+                ],
+            })
+
+    elif isinstance(message, ResultMessage):
+        await emitter.emit({
+            "type": "complete",
+            "duration_s": round(message.duration_ms / 1000, 1),
+            "cost_usd": round(message.total_cost_usd or 0, 4),
+            "turns": message.num_turns,
+            "is_error": message.is_error,
+            "result": (message.result or "")[:500],
+        })
+
+
+def _make_ui_can_use_tool(emitter: "EventEmitter"):
+    """Create a can_use_tool callback that routes approvals through the UI."""
+    from events import EventEmitter
+
+    async def can_use_tool_ui(tool_name: str, input_data: dict, context) -> object:
+        read_only = {"Read", "Glob", "Grep", "WebSearch", "WebFetch"}
+        if tool_name in read_only:
+            return PermissionResultAllow(updated_input=input_data)
+
+        if tool_name in ("Write", "Edit"):
+            file_path = input_data.get("file_path", "")
+            if "/output/" in file_path:
+                return PermissionResultAllow(updated_input=input_data)
+
+        if tool_name.startswith("mcp__arxiv"):
+            return PermissionResultAllow(updated_input=input_data)
+
+        if tool_name == "Agent":
+            return PermissionResultAllow(updated_input=input_data)
+
+        if tool_name == "Skill":
+            return PermissionResultAllow(updated_input=input_data)
+
+        if tool_name == "AskUserQuestion":
+            # Route through UI WebSocket
+            questions = input_data.get("questions", [])
+            if not questions:
+                questions = [{
+                    "question": input_data.get("question", ""),
+                    "header": "",
+                    "options": input_data.get("options", []),
+                }]
+
+            # Collect answers for all questions
+            answers = {}
+            for q in questions:
+                answer = await emitter.request_approval(
+                    question=q.get("question", ""),
+                    options=q.get("options", []),
+                    header=q.get("header", ""),
+                )
+                answers[q.get("question", "")] = answer
+
+            updated = {**input_data, "answers": answers}
+            if len(answers) == 1:
+                updated["answer"] = list(answers.values())[0]
+            return PermissionResultAllow(updated_input=updated)
+
+        if tool_name == "Bash":
+            cmd = input_data.get("command", "")
+            answer = await emitter.request_approval(
+                question=f"Agent wants to run command:\n```\n{cmd}\n```",
+                options=[
+                    {"label": "Allow", "value": "allow"},
+                    {"label": "Deny", "value": "deny"},
+                ],
+                header="Bash Command Approval",
+            )
+            if answer.lower() in ("allow", "y", "yes"):
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message="User denied this command.")
+
+        return PermissionResultAllow(updated_input=input_data)
+
+    return can_use_tool_ui
+
+
+async def run_director_ui(
+    objective: str,
+    papers: list[str],
+    mode: str,
+    emitter: "EventEmitter",
+) -> None:
+    """Launch the Director agent in UI mode (events via WebSocket)."""
+    from config import SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR
+    from events import EventEmitter
+
+    week_dir = get_latest_week_dir()
+
+    if mode == "local":
+        papers_section = (
+            f"## Mode\nlocal (papers are files on disk)\n\n"
+            f"## Paper Files\n"
+            + "\n".join(f"- {p}" for p in papers)
+        )
+        begin_msg = (
+            "Begin with Step 1: dispatch the **paper-reader** agent to read "
+            "and summarize the local paper files listed above."
+        )
+    else:
+        papers_section = (
+            f"## Mode\narxiv (use arxiv MCP server)\n\n"
+            f"## Paper IDs\n{json.dumps(papers)}"
+        )
+        begin_msg = (
+            "Begin with Step 1: dispatch the **arxiv-reader** agent to read "
+            "and summarize the papers listed above."
+        )
+
+    prompt = (
+        f"## Objective\n{objective}\n\n"
+        f"{papers_section}\n\n"
+        f"## Week Folder\n{week_dir}\n\n"
+        f"## Output Directories\n"
+        f"- Summaries: {SUMMARIES_DIR}\n"
+        f"- Plans: {PLANS_DIR}\n"
+        f"- Code: {CODE_DIR}\n"
+        f"- Reviews: {REVIEWS_DIR}\n\n"
+        f"{begin_msg}"
+    )
+
+    mcp_servers = {}
+    if mode == "arxiv":
+        mcp_servers["arxiv-mcp-server"] = ARXIV_MCP_CONFIG
+
+    options = ClaudeAgentOptions(
+        model=DIRECTOR_MODEL,
+        system_prompt=DIRECTOR_SYSTEM_PROMPT,
+        allowed_tools=[
+            "Read", "Write", "Glob", "Grep",
+            "Agent", "AskUserQuestion", "Skill",
+        ],
+        mcp_servers=mcp_servers,
+        agents=build_agent_definitions(),
+        can_use_tool=_make_ui_can_use_tool(emitter),
+        max_turns=50,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        setting_sources=["project"],
+    )
+
+    await emitter.emit({
+        "type": "stage_change",
+        "stage": "read",
+        "status": "running",
+    })
+
+    user_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    await user_queue.put({
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": prompt},
+        "parent_tool_use_id": None,
+    })
+
+    async def prompt_stream():
+        while True:
+            msg = await user_queue.get()
+            if msg is None:
+                break
+            yield msg
+
+    async for message in query(prompt=prompt_stream(), options=options):
+        await _emit_message(message, emitter)
