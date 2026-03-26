@@ -126,9 +126,12 @@ async def can_use_tool(tool_name: str, input_data: dict, context) -> object:
     if tool_name == "Agent":
         return PermissionResultAllow(updated_input=input_data)
 
-    # For Bash commands, show the command and ask
+    # For Bash commands, auto-allow if running inside the output directory;
+    # otherwise prompt the user.
     if tool_name == "Bash":
         cmd = input_data.get("command", "")
+        if "/output/" in cmd:
+            return PermissionResultAllow(updated_input=input_data)
         print(f"\n{'='*60}")
         print(f"  Agent wants to run: {cmd}")
         print(f"{'='*60}")
@@ -160,7 +163,7 @@ team of specialized sub-agents to turn research papers into working code.
 ## Your Workflow
 
 Follow these steps IN ORDER. After each agent completes, pause and get user
-approval before proceeding.
+approval before proceeding to the next step.
 
 ### Step 1: Read Papers
 - Check the **mode** field in the prompt:
@@ -169,28 +172,28 @@ approval before proceeding.
 - Include the objective in your prompt to the reader agent.
 - After it finishes, read output/summaries/_overview.md and present a brief
   summary to the user.
-- Ask the user: "Which papers/techniques should we proceed with?"
+- Use AskUserQuestion to ask: "Which papers/techniques should we proceed with?"
 
 ### Step 2: Generate Plan
 - Tell the planner agent to create an implementation plan.
 - Include the user's objective and any preferences from step 1.
 - After it finishes, read output/plans/plan.md and present the key points.
-- Ask the user: "Does this plan look good? Any changes?"
+- Use AskUserQuestion to ask: "Does this plan look good? Any changes?"
 
 ### Step 3: Write Code
 - Tell the coder agent to implement the approved plan.
 - After it finishes, list the files created in output/code/.
-- Ask the user: "Code is ready. Want to proceed to review, or make changes?"
+- Use AskUserQuestion to ask: "Code is ready. Want to proceed to review, or make changes?"
 
 ### Step 4: Review Code
 - Tell the reviewer agent to review the generated code.
 - After it finishes, read output/reviews/review.md and present findings.
-- If the review says NEEDS_CHANGES or FAIL, ask the user if they want to
-  iterate (send back to coder with review feedback).
+- If the review says NEEDS_CHANGES or FAIL, use AskUserQuestion to ask the
+  user if they want to iterate (send back to coder with review feedback).
 
 ### Step 5: Deliver
 - Present the final summary: papers read, plan, code location, review result.
-- Ask if the user wants to iterate on anything.
+- Use AskUserQuestion to ask if the user wants to iterate on anything.
 
 ## Your Skills
 You have two skills available:
@@ -200,11 +203,17 @@ You have two skills available:
   FAIL and the user approves a rework cycle. It handles sending review
   feedback back to the coder and re-running the reviewer.
 
-## Rules
-- ALWAYS use AskUserQuestion or direct questions to get user approval between
-  stages.
+## CRITICAL Rules
+- You MUST use the **AskUserQuestion** tool for ALL questions to the user.
+  NEVER ask questions in plain text. Plain text questions will crash the
+  pipeline because the CLI subprocess exits when there are no tool calls.
+  Every user-facing question MUST go through the AskUserQuestion tool.
+- NEVER output a text-only response as your final message. If you need to
+  present information to the user, ALWAYS follow it with an AskUserQuestion
+  tool call in the same turn.
 - NEVER skip a stage or proceed without user confirmation.
-- If a sub-agent fails, report the error and ask the user how to proceed.
+- If a sub-agent fails, report the error and use AskUserQuestion to ask the
+  user how to proceed.
 - Keep your own messages concise — the sub-agents do the heavy lifting.
 - Use the **pipeline-status** skill when resuming or when unsure about state.
 - Use the **iterate-feedback** skill for rework loops instead of manual dispatch.
@@ -418,27 +427,6 @@ async def run_director(
     if mode == "arxiv":
         mcp_servers["arxiv-mcp-server"] = ARXIV_MCP_CONFIG
 
-    options = ClaudeAgentOptions(
-        model=DIRECTOR_MODEL,
-        system_prompt=DIRECTOR_SYSTEM_PROMPT,
-        allowed_tools=[
-            "Read",
-            "Write",
-            "Glob",
-            "Grep",
-            "Agent",
-            "AskUserQuestion",
-            "Skill",
-        ],
-        mcp_servers=mcp_servers,
-        agents=build_agent_definitions(),
-        can_use_tool=can_use_tool,
-        max_turns=50,
-        cwd=str(Path(__file__).resolve().parent.parent),
-        stderr=on_stderr,
-        setting_sources=["project"],
-    )
-
     mode_label = "LOCAL files" if mode == "local" else "arXiv MCP"
     print(f"\n{'='*60}")
     print("  Research Swarm — Director Starting")
@@ -464,12 +452,51 @@ async def run_director(
         "parent_tool_use_id": None,
     })
 
+    # Wrap can_use_tool so AskUserQuestion answers feed back into the queue.
+    # The tool result alone may not keep the CLI alive; we also push a user
+    # message so prompt_stream() unblocks and the agent gets a new turn.
+    async def _can_use_tool_with_queue(tool_name: str, input_data: dict, context) -> object:
+        result = await can_use_tool(tool_name, input_data, context)
+        if tool_name == "AskUserQuestion" and isinstance(result, PermissionResultAllow):
+            answer = result.updated_input.get("answer", "")
+            if not answer:
+                answers = result.updated_input.get("answers", {})
+                answer = " | ".join(f"{k}: {v}" for k, v in answers.items()) if answers else "continue"
+            await user_queue.put({
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": answer},
+                "parent_tool_use_id": None,
+            })
+        return result
+
     async def prompt_stream():
         while True:
             msg = await user_queue.get()
             if msg is None:
                 break
             yield msg
+
+    options = ClaudeAgentOptions(
+        model=DIRECTOR_MODEL,
+        system_prompt=DIRECTOR_SYSTEM_PROMPT,
+        allowed_tools=[
+            "Read",
+            "Write",
+            "Glob",
+            "Grep",
+            "Agent",
+            "AskUserQuestion",
+            "Skill",
+        ],
+        mcp_servers=mcp_servers,
+        agents=build_agent_definitions(),
+        can_use_tool=_can_use_tool_with_queue,
+        max_turns=50,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        stderr=on_stderr,
+        setting_sources=["project"],
+    )
 
     async for message in query(prompt=prompt_stream(), options=options):
         _log_message(message)
