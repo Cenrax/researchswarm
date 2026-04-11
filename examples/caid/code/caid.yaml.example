@@ -1,0 +1,37 @@
+# CAID Framework Configuration
+# Copy to caid.yaml and customize for your project.
+
+# Operating mode: "commit0" (stub-filling) or "paperbench" (paper reproduction)
+mode: commit0
+
+# Path to the target git repository
+repo_path: ./my-repo
+
+# Task description (free text for commit0, paper path for paperbench)
+task_description: "Implement all stub functions and pass the test suite."
+
+# Number of concurrent engineer agents
+# Recommended: 4 for Commit0, 2 for PaperBench
+max_engineers: 4
+
+# Iteration limits (from CAID paper)
+manager_max_iterations: 50
+engineer_max_iterations: 80
+
+# Implementation rounds
+implementation_rounds: 2
+
+# Files that engineers must not modify
+restricted_files:
+  - "__init__.py"
+
+# Directory for git worktrees (isolated engineer workspaces)
+worktree_base_dir: /tmp/caid-worktrees
+
+# LLM configuration
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-5-20260120
+  # api_key: sk-...  # Or set CAID_LLM_API_KEY environment variable
+  temperature: 0.0
+  max_tokens: 4096
