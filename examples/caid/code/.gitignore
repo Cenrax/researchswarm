@@ -1,0 +1,31 @@
+# CAID config (may contain API keys)
+caid.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.venv/
+venv/
+
+# CAID worktrees
+/tmp/caid-worktrees/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
