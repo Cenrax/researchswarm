@@ -69,6 +69,10 @@ Write your review to `output/reviews/review.md` with:
 6. **Specific Fix Suggestions**: Code snippets showing how to fix issues.
 
 If the assessment is PASS, also note what was done particularly well.
+
+## Write Boundary
+You may ONLY write files under `output/reviews/`. Writing to any other output
+subdirectory (summaries/, plans/, code/, agent/) is STRICTLY FORBIDDEN.
 """
 
 REVIEWER_SKILLS = ["paper-alignment-check", "security-audit"]

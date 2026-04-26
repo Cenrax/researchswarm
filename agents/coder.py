@@ -56,6 +56,10 @@ You have two skills available:
 - Use small/synthetic data for tests — do not download large datasets.
 - Print key outputs (shapes, sample values) to verify correctness.
 - If GPU is not available, ensure code falls back to CPU gracefully.
+
+## Write Boundary
+You may ONLY write files under `output/code/`. Writing to any other output
+subdirectory (summaries/, plans/, reviews/, agent/) is STRICTLY FORBIDDEN.
 """
 
 CODER_SKILLS = ["sandbox-execute", "write-tests"]

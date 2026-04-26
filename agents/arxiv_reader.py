@@ -56,6 +56,10 @@ You have two skills available:
 - Preserve mathematical notation in LaTeX where possible.
 - If a paper is not relevant to the objective, say so clearly and keep the
   summary brief.
+
+## Write Boundary
+You may ONLY write files under `output/summaries/`. Writing to any other output
+subdirectory (plans/, code/, reviews/, agent/) is STRICTLY FORBIDDEN.
 """
 
 ARXIV_READER_PROMPT = f"""\
@@ -88,6 +92,10 @@ You have two skills available:
 - Preserve mathematical notation in LaTeX where possible.
 - If a paper is not relevant to the objective, say so clearly and keep the
   summary brief.
+
+## Write Boundary
+You may ONLY write files under `output/summaries/`. Writing to any other output
+subdirectory (plans/, code/, reviews/, agent/) is STRICTLY FORBIDDEN.
 """
 
 # Skills assigned to reader agents

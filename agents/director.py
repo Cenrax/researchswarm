@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_agent_sdk import (
     AgentDefinition,
     ClaudeAgentOptions,
+    HookCallback,
+    HookContext,
+    HookInput,
+    HookJSONOutput,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     query,
@@ -41,11 +46,13 @@ from claude_agent_sdk.types import (
 )
 
 from config import (
+    AGENT_WRITE_PERMISSIONS,
     ARXIV_MCP_CONFIG,
     DIRECTOR_MODEL,
     create_project_output,
     get_latest_week_dir,
 )
+from agents.trace import TraceWriter
 
 from agents.arxiv_reader import make_arxiv_reader, make_local_reader
 from agents.planner import make_planner
@@ -142,6 +149,51 @@ async def can_use_tool(tool_name: str, input_data: dict, context) -> object:
 
     # Default: allow
     return PermissionResultAllow(updated_input=input_data)
+
+
+# ── Write guard hook (fires for sub-agent tool calls) ──────────────────────
+
+async def _write_guard_hook(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext,
+) -> HookJSONOutput:
+    """PreToolUse hook that enforces per-agent write boundaries.
+
+    Fires for Write/Edit tool calls. When the call originates from a
+    sub-agent (``agent_type`` is present), the file path is checked against
+    :data:`config.AGENT_WRITE_PERMISSIONS`.  Director-level calls (no
+    ``agent_type``) pass through — they are governed by ``can_use_tool``.
+    """
+    agent_type = input_data.get("agent_type")
+    if not agent_type:
+        return {}  # Director — defer to can_use_tool
+
+    tool_name = input_data.get("tool_name", "")
+    if tool_name not in ("Write", "Edit"):
+        return {}
+
+    allowed_dirs = AGENT_WRITE_PERMISSIONS.get(agent_type)
+    if allowed_dirs is None:
+        return {}  # Unknown agent type — don't break new agents
+
+    tool_input = input_data.get("tool_input", {})
+    file_path: str = tool_input.get("file_path", "")
+
+    for allowed in allowed_dirs:
+        if f"/{allowed}/" in file_path or file_path.endswith(f"/{allowed}"):
+            return {}  # Allowed
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"Agent '{agent_type}' is not allowed to write to '{file_path}'. "
+                f"Allowed directories: {allowed_dirs}"
+            ),
+        },
+    }
 
 
 # ── Director system prompt ──────────────────────────────────────────────────
@@ -241,8 +293,8 @@ def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def _log_message(message: object) -> None:
-    """Pretty-print every SDK message to the terminal."""
+def _log_message(message: object, trace: TraceWriter | None = None) -> None:
+    """Pretty-print every SDK message to the terminal and write to trace."""
 
     # ── Assistant message (text, tool calls, thinking) ───────────────────
     if isinstance(message, AssistantMessage):
@@ -250,6 +302,12 @@ def _log_message(message: object) -> None:
             if isinstance(block, TextBlock):
                 print(f"\n{_CYAN}{_BOLD}[{_ts()}] Director:{_RESET}")
                 print(f"  {block.text}")
+                if trace:
+                    trace.write_event(
+                        "assistant_text",
+                        agent_name="director",
+                        summary=block.text[:200],
+                    )
 
             elif isinstance(block, ToolUseBlock):
                 # Detect sub-agent spawns
@@ -265,12 +323,27 @@ def _log_message(message: object) -> None:
                     prompt_preview = block.input.get("prompt", "")[:150]
                     if prompt_preview:
                         print(f"  {_DIM}Prompt: {prompt_preview}...{_RESET}")
+                    if trace:
+                        trace.write_event(
+                            "agent_spawn",
+                            agent_name="director",
+                            tool_name="Agent",
+                            summary=desc,
+                            metadata={"subagent_type": agent_type},
+                        )
                 elif block.name == "AskUserQuestion":
                     # Don't log here — the can_use_tool callback
                     # will show the full question and collect the answer.
                     print(
                         f"\n{_YELLOW}{_BOLD}[{_ts()}] Asking user for input...{_RESET}"
                     )
+                    if trace:
+                        trace.write_event(
+                            "user_question",
+                            agent_name="director",
+                            tool_name="AskUserQuestion",
+                            summary=str(block.input.get("question", ""))[:200],
+                        )
                 else:
                     print(
                         f"\n{_YELLOW}[{_ts()}] Tool call: {_BOLD}{block.name}{_RESET}"
@@ -281,19 +354,36 @@ def _log_message(message: object) -> None:
                         if len(val_str) > 200:
                             val_str = val_str[:200] + "..."
                         print(f"  {_DIM}{key}: {val_str}{_RESET}")
+                    if trace:
+                        trace.write_event(
+                            "tool_call",
+                            agent_name="director",
+                            tool_name=block.name,
+                            summary=str(block.input)[:200],
+                        )
 
             elif isinstance(block, ThinkingBlock):
                 preview = block.thinking[:100].replace("\n", " ")
                 print(f"  {_DIM}[{_ts()}] Thinking: {preview}...{_RESET}")
+                if trace:
+                    trace.write_event(
+                        "thinking",
+                        agent_name="director",
+                        summary=preview,
+                    )
 
     # ── Tool results ─────────────────────────────────────────────────────
     elif isinstance(message, ToolResultBlock):
         content = str(message.content or "")
         if message.is_error:
             print(f"  {_RED}[{_ts()}] Tool error: {content[:200]}{_RESET}")
+            if trace:
+                trace.write_event("tool_error", summary=content[:200])
         else:
             preview = content[:200].replace("\n", " ")
             print(f"  {_GREEN}[{_ts()}] Tool result: {preview}{_RESET}")
+            if trace:
+                trace.write_event("tool_result", summary=preview)
 
     # ── Task lifecycle (sub-agent progress) ──────────────────────────────
     elif isinstance(message, TaskStartedMessage):
@@ -301,6 +391,11 @@ def _log_message(message: object) -> None:
             f"\n{_BLUE}{_BOLD}[{_ts()}] Task started: "
             f"{message.description}{_RESET}"
         )
+        if trace:
+            trace.write_event(
+                "task_started",
+                summary=message.description,
+            )
 
     elif isinstance(message, TaskProgressMessage):
         tool_info = ""
@@ -311,6 +406,13 @@ def _log_message(message: object) -> None:
             f"  {_BLUE}[{_ts()}] Task progress: {message.description}"
             f"{tool_info} [{tokens:,} tokens]{_RESET}"
         )
+        if trace:
+            trace.write_event(
+                "task_progress",
+                tool_name=message.last_tool_name,
+                summary=message.description,
+                metadata={"tokens": tokens},
+            )
 
     elif isinstance(message, TaskNotificationMessage):
         status_color = _GREEN if message.status == "completed" else _RED
@@ -318,6 +420,12 @@ def _log_message(message: object) -> None:
             f"\n{status_color}{_BOLD}[{_ts()}] Task {message.status}: "
             f"{message.summary[:200]}{_RESET}"
         )
+        if trace:
+            trace.write_event(
+                "task_completed" if message.status == "completed" else "task_failed",
+                summary=message.summary[:200],
+                metadata={"status": message.status},
+            )
 
     # ── System messages (init, compact, etc.) ────────────────────────────
     elif isinstance(message, SystemMessage):
@@ -336,6 +444,11 @@ def _log_message(message: object) -> None:
             print(
                 f"  {_DIM}[{_ts()}] System ({message.subtype}){_RESET}"
             )
+        if trace:
+            trace.write_event(
+                "system",
+                summary=message.subtype,
+            )
 
     # ── Final result ─────────────────────────────────────────────────────
     elif isinstance(message, ResultMessage):
@@ -350,6 +463,23 @@ def _log_message(message: object) -> None:
         elif message.result:
             print(f"\n{message.result}")
         print(f"{'='*60}")
+        if trace:
+            trace.write_event(
+                "pipeline_result",
+                summary=str(message.result or "")[:200],
+                metadata={
+                    "cost_usd": cost,
+                    "turns": turns,
+                    "duration_s": duration_s,
+                    "is_error": message.is_error,
+                },
+            )
+            trace.write_session_end(
+                total_cost_usd=cost,
+                num_turns=turns,
+                duration_s=duration_s,
+                is_error=message.is_error,
+            )
 
     # ── User messages (echoed input) ─────────────────────────────────────
     elif isinstance(message, UserMessage):
@@ -383,6 +513,9 @@ async def run_director(
     """
     paths = create_project_output(objective)
     project_dir = paths["project_dir"]
+
+    trace = TraceWriter(paths["agent"])
+    trace.write_session_start(objective, mode, papers)
 
     week_dir = get_latest_week_dir()
 
@@ -489,6 +622,14 @@ async def run_director(
             "AskUserQuestion",
             "Skill",
         ],
+        hooks={
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="Write|Edit",
+                    hooks=[_write_guard_hook],
+                ),
+            ],
+        },
         mcp_servers=mcp_servers,
         agents=build_agent_definitions(),
         can_use_tool=_can_use_tool_with_queue,
@@ -498,5 +639,8 @@ async def run_director(
         setting_sources=["project"],
     )
 
-    async for message in query(prompt=prompt_stream(), options=options):
-        _log_message(message)
+    try:
+        async for message in query(prompt=prompt_stream(), options=options):
+            _log_message(message, trace=trace)
+    finally:
+        trace.close()

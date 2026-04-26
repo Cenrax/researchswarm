@@ -76,6 +76,10 @@ A numbered list of discrete, independently testable steps. Each step must have:
 - Prefer simple, proven libraries (PyTorch, numpy, etc.).
 - Each step should produce runnable code that can be tested in isolation.
 - Keep the plan actionable — no hand-waving.
+
+## Write Boundary
+You may ONLY write files under `output/plans/`. Writing to any other output
+subdirectory (summaries/, code/, reviews/, agent/) is STRICTLY FORBIDDEN.
 """
 
 PLANNER_SKILLS = ["architecture-design", "dependency-analysis"]

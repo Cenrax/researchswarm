@@ -104,7 +104,7 @@ You give the system an **objective** (e.g., "Build a transformer text classifier
 | 4. Review | **Reviewer** | Reviews code for correctness & paper alignment | `output/reviews/review.md` |
 | 5. Deliver | **Director** | Presents final summary | Terminal |
 
-**User approval is required between every stage.**
+**User approval is required between every stage.** Every tool call, agent spawn, and decision is recorded to `output/agent/trace.jsonl` for auditability.
 
 ### Two Input Modes
 
@@ -127,12 +127,13 @@ graph LR
 ```
 agentsclaude/
 ├── main.py                        # CLI entry point
-├── config.py                      # Paths, MCP config, model choices
+├── config.py                      # Paths, MCP config, model choices, write permissions
 ├── requirements.txt
 ├── .env                           # API keys (not committed)
 │
 ├── agents/
-│   ├── director.py                # Orchestrator with colored terminal logging
+│   ├── director.py                # Orchestrator with logging, trace, and write guards
+│   ├── trace.py                   # Append-only execution trace (JSONL + session metadata)
 │   ├── arxiv_reader.py            # Paper reading (local + arXiv sub-agents)
 │   ├── planner.py                 # Implementation planning sub-agent (Opus)
 │   ├── coder.py                   # Code writing + sandbox execution (Opus)
@@ -164,15 +165,20 @@ agentsclaude/
 │       ├── notes.md               # Or markdown files
 │       └── paper_ids.json         # Or arXiv IDs (fallback)
 │
-├── output/                        # All generated artifacts
-│   ├── summaries/                 # Paper summaries + _overview.md
-│   ├── plans/                     # Implementation plans
-│   ├── code/                      # Generated source code
-│   └── reviews/                   # Code review reports
+├── output/                        # All generated artifacts (per-project timestamped)
+│   └── <timestamp>_<slug>/        # e.g. 20260426_143021_build-a-transformer/
+│       ├── summaries/             # Paper summaries + _overview.md
+│       ├── plans/                 # Implementation plans
+│       ├── code/                  # Generated source code
+│       ├── reviews/               # Code review reports
+│       └── agent/                 # Execution trace and session metadata
+│           ├── trace.jsonl        # Append-only event log
+│           └── session.json       # Pipeline run metadata
 │
 └── tests/
     ├── test_arxiv_mcp.py          # MCP server connectivity tests
-    └── test_agent_skills.py       # Skill assignment & isolation tests
+    ├── test_agent_skills.py       # Skill assignment & isolation tests
+    └── test_hardening.py          # Write guards, trace, and agent/ dir tests
 ```
 
 ## Quick Start
@@ -342,6 +348,65 @@ The `can_use_tool` callback in `director.py` controls what's auto-approved:
 | Bash commands | **Prompts user** with the command |
 | Everything else | Auto-approved (configurable) |
 
+### Write Guards
+
+Sub-agents are restricted to their own output subdirectory. This is enforced at two levels:
+
+**1. Hard guard — `PreToolUse` hook.** A SDK hook fires on every `Write`/`Edit` tool call from sub-agents. It checks the `agent_type` against `AGENT_WRITE_PERMISSIONS` in `config.py` and denies writes outside the agent's allowed directory.
+
+**2. Soft guard — prompt instructions.** Each agent's system prompt contains a `## Write Boundary` section explicitly stating which directory it may write to and that all others are forbidden.
+
+| Agent | Allowed directory | Blocked from |
+|-------|------------------|-------------|
+| Paper Reader | `summaries/` | plans/, code/, reviews/, agent/ |
+| ArXiv Reader | `summaries/` | plans/, code/, reviews/, agent/ |
+| Planner | `plans/` | summaries/, code/, reviews/, agent/ |
+| Coder | `code/` | summaries/, plans/, reviews/, agent/ |
+| Reviewer | `reviews/` | summaries/, plans/, code/, agent/ |
+
+The `agent/` directory is protected from all sub-agents — only the Director's `TraceWriter` writes there (via direct file I/O, not through SDK tools).
+
+To grant a new agent write access, add an entry to `AGENT_WRITE_PERMISSIONS` in `config.py`:
+
+```python
+AGENT_WRITE_PERMISSIONS: dict[str, list[str]] = {
+    "paper-reader": ["summaries"],
+    "my-new-agent": ["code", "plans"],  # can write to multiple dirs
+}
+```
+
+### Execution Trace
+
+Every pipeline run writes a durable audit trail to `output/<project>/agent/`:
+
+**`trace.jsonl`** — append-only, one JSON line per event:
+
+```json
+{"ts": "2026-04-26T14:32:03Z", "event_type": "agent_spawn", "agent_name": "director", "tool_name": "Agent", "summary": "Read and summarize papers", "metadata": {"subagent_type": "paper-reader"}}
+{"ts": "2026-04-26T14:32:10Z", "event_type": "task_progress", "tool_name": "Read", "summary": "Read papers", "metadata": {"tokens": 3241}}
+{"ts": "2026-04-26T14:34:30Z", "event_type": "pipeline_result", "summary": "Complete", "metadata": {"cost_usd": 0.1247, "turns": 24, "duration_s": 142.3}}
+```
+
+Event types: `assistant_text`, `agent_spawn`, `user_question`, `tool_call`, `tool_result`, `tool_error`, `thinking`, `task_started`, `task_progress`, `task_completed`, `task_failed`, `system`, `pipeline_result`.
+
+**`session.json`** — written at start, updated at end:
+
+```json
+{
+  "objective": "Build a transformer text classifier",
+  "mode": "local",
+  "papers": ["attention_paper.pdf"],
+  "start_time": "2026-04-26T14:32:01Z",
+  "end_time": "2026-04-26T14:34:23Z",
+  "duration_s": 142.3,
+  "total_cost_usd": 0.1247,
+  "num_turns": 24,
+  "status": "completed"
+}
+```
+
+If a run crashes, `session.json` will still show `"status": "running"` and `trace.jsonl` will contain all events up to the crash point (flushed after every write).
+
 ### Skills System
 
 Skills are reusable behaviors that agents invoke autonomously based on task context. Each agent has a restricted set of skills — enforced by the `skills` field on `AgentDefinition`.
@@ -429,6 +494,9 @@ python -m pytest tests/ -v
 # Skill assignment & isolation tests only
 python tests/test_agent_skills.py
 
+# Hardening tests (write guards, trace, agent/ dir)
+python tests/test_hardening.py
+
 # MCP connectivity tests only (requires Docker)
 python tests/test_arxiv_mcp.py
 ```
@@ -444,6 +512,16 @@ python tests/test_arxiv_mcp.py
 8. Coder has no reviewer skills
 9. Reviewer has no execution skills
 10. Planner has no execution skills
+
+### Hardening tests verify (8 checks):
+1. `create_project_output()` creates the `agent/` directory
+2. Every agent prompt contains a Write Boundary section with the correct allowed directory
+3. Every agent with Write/Edit tools has an entry in `AGENT_WRITE_PERMISSIONS`
+4. No sub-agent has write access to the `agent/` directory
+5. `trace.jsonl` entries have the required schema (`ts`, `event_type`)
+6. `session.json` lifecycle works (start with running, end with completed)
+7. Trace file is append-only (multiple writers don't truncate)
+8. Write guard hook blocks cross-boundary writes and passes same-boundary writes
 
 ### MCP tests verify:
 1. Docker is running
@@ -581,10 +659,13 @@ The `description` field is critical — it's what Claude reads to decide whether
 
 1. Create `agents/my_agent.py` with a `make_my_agent()` function returning `(name, AgentDefinition)`
 2. Create skills for the agent in `.claude/skills/`
-3. Import and add it to `build_agent_definitions()` in `director.py`
-4. Update the Director's system prompt to include the new agent in the workflow
-5. Add skill expectations to `tests/test_agent_skills.py`
-6. Optionally create a slash command in `.claude/commands/my-command.md`
+3. Add a `## Write Boundary` section to the agent's system prompt
+4. Add the agent to `AGENT_WRITE_PERMISSIONS` in `config.py`
+5. Import and add it to `build_agent_definitions()` in `director.py`
+6. Update the Director's system prompt to include the new agent in the workflow
+7. Add skill expectations to `tests/test_agent_skills.py`
+8. Run `python tests/test_hardening.py` to verify write guards
+9. Optionally create a slash command in `.claude/commands/my-command.md`
 
 ### Changing Models
 

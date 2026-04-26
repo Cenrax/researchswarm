@@ -18,6 +18,7 @@ SUMMARIES_DIR: Path = OUTPUT_DIR / "summaries"
 PLANS_DIR: Path = OUTPUT_DIR / "plans"
 CODE_DIR: Path = OUTPUT_DIR / "code"
 REVIEWS_DIR: Path = OUTPUT_DIR / "reviews"
+AGENT_DIR: Path = OUTPUT_DIR / "agent"
 
 # ── ArXiv MCP Server ────────────────────────────────────────────────────────
 ARXIV_STORAGE_PATH = os.getenv(
@@ -50,6 +51,17 @@ REVIEWER_MODEL = "sonnet"
 
 
 PAPER_EXTENSIONS = {".pdf", ".md", ".txt", ".tex"}
+
+# Per-agent write-path constraints.
+# Keys are agent type names (as used in AgentDefinition); values are the
+# subdirectory names under the project output that the agent may write to.
+AGENT_WRITE_PERMISSIONS: dict[str, list[str]] = {
+    "paper-reader": ["summaries"],
+    "arxiv-reader": ["summaries"],
+    "planner": ["plans"],
+    "coder": ["code"],
+    "reviewer": ["reviews"],
+}
 
 
 def get_latest_week_dir() -> Path:
@@ -115,7 +127,7 @@ def create_project_output(objective: str) -> dict[str, Path]:
     Returns a dict with the project paths and updates the module-level
     SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR.
     """
-    global SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR
+    global SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR, AGENT_DIR
 
     slug = _slugify(objective)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -125,8 +137,9 @@ def create_project_output(objective: str) -> dict[str, Path]:
     PLANS_DIR = project_dir / "plans"
     CODE_DIR = project_dir / "code"
     REVIEWS_DIR = project_dir / "reviews"
+    AGENT_DIR = project_dir / "agent"
 
-    for d in (SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR):
+    for d in (SUMMARIES_DIR, PLANS_DIR, CODE_DIR, REVIEWS_DIR, AGENT_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
     return {
@@ -135,6 +148,7 @@ def create_project_output(objective: str) -> dict[str, Path]:
         "plans": PLANS_DIR,
         "code": CODE_DIR,
         "reviews": REVIEWS_DIR,
+        "agent": AGENT_DIR,
     }
 
 
